@@ -20,6 +20,8 @@ import warnings
 import numpy as np
 import numpy.fft as fft
 import pandas as pd
+from scipy.ndimage import minimum_filter1d
+from collections import deque
 from numba import njit, objmode, prange
 
 from aeon.transformations.series.base import BaseSeriesTransformer
@@ -102,7 +104,7 @@ def _sliding_mean_std(X, m):
 
 
 @njit(fastmath=True, cache=True, parallel=True)
-def _compute_distances_iterative(X, m, k, n_jobs=1, slack=0.5):
+def _compute_distances_ed(X, m, k, r=None, n_jobs=1, slack=0.5):
     """Compute kNN indices with dot-product.
 
     No-loops implementation for a time series, given
@@ -127,6 +129,9 @@ def _compute_distances_iterative(X, m, k, n_jobs=1, slack=0.5):
     knns : array-like, shape = [n-m+1, k], dtype=int
         The knns (offsets!) for each subsequence in X
     """
+    if r is not None:
+        warnings.warn("Parameter r is ignored for z-normalized euclidian distance.")
+
     n = np.int32(X.shape[0] - m + 1)
     halve_m = int(m * slack)
 
@@ -171,6 +176,403 @@ def _compute_distances_iterative(X, m, k, n_jobs=1, slack=0.5):
                 knns[order] = np.argpartition(dist, k)[:k]
             else:
                 knns[order] = np.arange(dist.shape[0], dtype=np.int64)
+
+    return knns
+
+
+def minimum_filter_1d_deque(X, r):
+    """
+    Apply the trailing minimum filter along columns of a 2D array.
+
+    Parameters
+    ----------
+    X : array-like, shape [m, n]
+        The 2D array for which to calculate a sliding window minimum on each column
+    r : int
+        The size of the filter
+
+    Returns
+    -------
+    out : array-like, shape [m, n]
+        A 2D array after applying the sliding minimum filter
+    """
+    n_rows, n_cols = X.shape
+    out = np.empty_like(X)
+
+    for col in prange(n_cols):
+        out[:, col] = _sliding_row_min(X[:, col], r)
+
+    return out
+
+#@njit(fastmath=True, cache=True, parallel=True)
+def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
+    """
+    Computes kNN indices given the prefix/suffix-distance approach by
+    Imani et al.
+
+    Parameters
+    ----------
+    X : array-like, shape [n]
+        A single univariate time series of length n
+    s : int
+        The prefix/suffix length
+    r : int
+        The maximum >>don't-care<< length
+    k : int
+        The number of nearest neighbors
+    slack : float, default = 0.5
+        Defines an exclusion zone around each subsequence to avoid trivial matches.
+        Defined as percentage of m. E.g. 0.5 is equal to half the prefix/suffix length.
+    n_jobs : int, default = 1
+        Number of jobs to be used.
+
+    Returns
+    -------
+    knns : array-like, shape = [n-2s+1, k], dtype=int
+        The knns (offsets!) for each subsequence in X
+    """
+    n_windows = np.int32(X.shape[0] - s + 1)
+    exclusion_radius = int(2 * (s+r) * slack)
+
+    knns = np.zeros(shape=(n_windows-s, k), dtype=np.int64)
+
+    means, stds = _sliding_mean_std(X, s)
+    dot_first = _sliding_dot_product(X[:s], X)
+    bin_size = X.shape[0] // n_jobs
+
+    D = np.empty((n_windows,n_windows))
+
+    for idx in prange(n_jobs):
+        start = idx * bin_size
+        end = min((idx + 1) * bin_size, n_windows)
+
+        dot_prev = None
+        for order in np.arange(start, end):
+            if order == start:
+                # first iteration O(n log n)
+                dot_rolled = _sliding_dot_product(X[start : start + s], X)
+            else:
+                # constant time O(1) operations
+                dot_rolled = (
+                    np.roll(dot_prev, 1)
+                    + X[order + s - 1] * X[s - 1 : n_windows + s]
+                    - X[order - 1] * np.roll(X[:n_windows], 1)
+                )
+                dot_rolled[0] = dot_first[order]
+            dot_prev = dot_rolled
+
+            x_mean = means[order]
+            x_std = stds[order]
+
+            dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))            
+            D[order] = dist
+
+    M = minimum_filter_1d_deque(D[s:, s:], r) # minimum_filter1d(D[s:, s:], size=2, mode='nearest', origin=0, axis=1)
+    N = minimum_filter_1d_deque(M.T, r).T # minimum_filter1d(M, size=2, mode='nearest', origin=0, axis=0)
+
+    SMaP = D[:N.shape[0], :N.shape[1]] + N
+    
+    for idx in prange(n_jobs):
+        start = idx * bin_size
+        end = min((idx + 1) * bin_size, SMaP.shape[0])
+
+        for order in np.arange(start, end):
+            # self-join: exclusion zone
+            trivialMatchRange = (
+                int(max(0, order - exclusion_radius)),
+                int(min(order + exclusion_radius, n_windows-s)),
+            )
+            SMaP[order, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+
+            if SMaP.shape[0] >= k:
+                knns[order] = np.argpartition(SMaP[order], k)[:k]
+            else:
+                knns[order] = np.arange(SMaP[order].shape[0], dtype=np.int64)
+
+    return knns
+
+from collections import deque
+import numpy as np
+
+class _SlidingColumnMin:
+    """
+    Efficiently computes sliding-window minimum values along each column of
+    a matrix-like input, one row at a time.
+
+    This class maintains a separate monotonic deque for each column, allowing
+    updates in amortized O(1) per element. It is useful in algorithms that 
+    require column-wise sliding minima (e.g., in image processing, matrix 
+    morphology operations, or time-series analysis with multiple features).
+
+    Attributes
+    ----------
+    deques : list[deque]
+        One deque per column, each storing (time, value) pairs in increasing 
+        order of value.
+    window : int
+        The sliding window size, expressed in number of rows.
+    time : int
+        The current row index (increments with each update).
+    """
+
+    def __init__(self, n_cols, window):
+        """
+        Initialize the sliding column minimum structure.
+
+        Parameters
+        ----------
+        n_cols : int
+            Number of columns to track.
+        window : int
+            Sliding window size in number of rows. Only values within the last
+            `window` rows are considered for the minimum.
+        """
+        self.deques = [deque() for _ in range(n_cols)]
+        self.window = window
+        self.time = 0
+
+    def update(self, row):
+        """
+        Process a new row and compute the sliding minimum for each column.
+
+        Parameters
+        ----------
+        row : array-like
+            A sequence of values (length = n_cols) representing the next row
+            of data.
+
+        Returns
+        -------
+        result : np.ndarray
+            Array of length n_cols, where each entry is the current minimum of
+            that column within the last `window` rows.
+        """
+        result = np.empty(len(row))
+        for j, val in enumerate(row):
+            dq = self.deques[j]
+
+            # Remove elements larger than the new value (maintain increasing order)
+            while dq and dq[-1][1] >= val:
+                dq.pop()
+            dq.append((self.time, val))
+
+            # Remove elements that are outside the sliding window
+            while dq and dq[0][0] < self.time - self.window:
+                dq.popleft()
+
+            result[j] = dq[0][1]
+        self.time += 1
+        return result
+
+    
+def _sliding_row_min(row, window_size):
+    """
+    Calculates a sliding minimum filter on an array.
+
+    Parameters
+    ----------
+
+    """
+    n = len(row)
+    result = np.empty(n)
+    dq = deque()
+    dq.append((0, row[0]))
+
+    for i in range(n):
+        # remove elements that are out of the current window (to the left)
+        while dq and dq[0][0] < i:
+            dq.popleft()
+
+        # add new element for the window end
+        end = min(i + window_size, n - 1)
+        val = row[end]
+        while dq and dq[-1][1] >= val:
+            dq.pop()
+        dq.append((end, val))
+
+        # the front of the deque is the min in the current window
+        result[i] = dq[0][1]
+
+    return result
+
+# TODO: numba compatible
+def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
+    """
+    Computes kNN indices given the prefix/suffix-distance approach by
+    Imani et al.
+    Only keeps s+r+1 rows in memory at one time.
+
+    Parameters
+    ----------
+    X : array-like, shape [n]
+        A single univariate time series of length n
+    s : int
+        The prefix/suffix length
+    r : int
+        The maximum >>don't-care<< length
+    k : int
+        The number of nearest neighbors
+    slack : float, default = 0.5
+        Defines an exclusion zone around each subsequence to avoid trivial matches.
+        Defined as percentage of m. E.g. 0.5 is equal to half the prefix/suffix length.
+    n_jobs : int, default = 1
+        Number of jobs to be used.
+
+    Returns
+    -------
+    knns : array-like, shape = [n-2s+1, k], dtype=int
+        The knns (offsets!) for each subsequence in X
+    """
+    n_windows = np.int32(X.shape[0] - s + 1)
+    n_smp_points = np.int32(X.shape[0] - 2*s + 1)
+    exclusion_radius = int(2 * (r+s) * slack)
+
+    D = deque()
+    sliding_col_min = _SlidingColumnMin(n_cols=n_smp_points, window=r)
+    knns = np.zeros(shape=(n_smp_points, k), dtype=np.int64)
+
+    means, stds = _sliding_mean_std(X, s)
+    dot_first = _sliding_dot_product(X[:s], X)
+    # bin_size = X.shape[0] // n_jobs
+
+    dot_prev = None
+    for order in range(n_windows):
+        if order == 0:
+            # first iteration O(n log n)
+            dot_rolled = _sliding_dot_product(X[:s], X)
+        else:
+            # constant time O(1) operations
+            dot_rolled = (
+                np.roll(dot_prev, 1)
+                + X[order + s - 1] * X[s - 1 : n_windows + s]
+                - X[order - 1] * np.roll(X[:n_windows], 1)
+            )
+            dot_rolled[0] = dot_first[order]
+        dot_prev = dot_rolled
+
+        x_mean = means[order]
+        x_std = stds[order]
+
+        dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
+        D.append(dist)
+
+        M_i = sliding_col_min.update(dist[s:])
+
+        if order >= s+r:
+            N_i = _sliding_row_min(M_i, r)
+            SMaP_i = D.popleft()[:N_i.shape[0]] + N_i
+        
+            trivialMatchRange = (
+                    int(max(0, order-s-r - exclusion_radius)),
+                    int(min(order-s-r + exclusion_radius, n_windows)),
+                )
+            SMaP_i[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+            
+            knns[order-s-r] = np.argpartition(SMaP_i, k)[:k]
+
+    for order in range(r):
+        M_i = sliding_col_min.update(D[-1][s:])
+        N_i = _sliding_row_min(M_i, r)
+        SMaP_i = D.popleft()[:N_i.shape[0]] + N_i
+    
+        trivialMatchRange = (
+                int(max(0, n_smp_points - r + order - exclusion_radius)),
+                n_smp_points,
+            )
+        SMaP_i[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+        
+        knns[order-r] = np.argpartition(SMaP_i, k)[:k]
+
+    return knns
+
+def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
+    """
+    Computes kNN indices given the prefix/suffix-distance approach by
+    Imani et al.
+    Batchwise computation of distances possible.
+    
+    Parameters
+    ----------
+    X : array-like, shape [n]
+        A single univariate time series of length n
+    s : int
+        The prefix/suffix length
+    r : int
+        The maximum >>don't-care<< length
+    k : int
+        The number of nearest neighbors
+    slack : float, default = 0.5
+        Defines an exclusion zone around each subsequence to avoid trivial matches.
+        Defined as percentage of m. E.g. 0.5 is equal to half the prefix/suffix length.
+    n_jobs : int, default = 1
+        Number of jobs to be used.
+
+    Returns
+    -------
+    knns : array-like, shape = [n-2s+1, k], dtype=int
+        The knns (offsets!) for each subsequence in X
+    """
+    n_windows = np.int32(X.shape[0] - s + 1)
+    n_smp_points = np.int32(X.shape[0] - 2*s + 1)
+    exclusion_radius = int(2 * (s + r) * slack)
+    knns = np.zeros(shape=(n_windows - s, k), dtype=np.int64)
+
+    means, stds = _sliding_mean_std(X, s)
+    dot_first = _sliding_dot_product(X[:s], X)
+
+    bin_size = (n_smp_points + 1) // n_jobs
+    if bin_size * n_jobs < n_smp_points:
+        bin_size += 1
+
+    for idx in range(n_jobs):
+        # define batch range
+        start = idx * bin_size
+        end = min((idx + 1) * bin_size, n_smp_points)
+
+        # add overlap
+        batch_end = min(n_windows, end + s + r)
+
+        # allocate batch distance matrix
+        D_batch = np.empty((batch_end - start, n_windows), dtype=np.float64)
+
+        # compute distances for this batch
+        dot_prev = None
+        for j, order in enumerate(range(start, batch_end)):
+            if order == start:
+                dot_rolled = _sliding_dot_product(X[order:order + s], X)
+            else:
+                dot_rolled = (
+                    np.roll(dot_prev, 1)
+                    + X[order + s - 1] * X[s - 1 : n_windows + s]
+                    - X[order - 1] * np.roll(X[:n_windows], 1)
+                )
+                dot_rolled[0] = dot_first[order]
+            dot_prev = dot_rolled
+
+            x_mean = means[order]
+            x_std = stds[order]
+            dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
+            D_batch[j] = dist
+
+        # apply sliding min filters (only valid part)
+        M = minimum_filter_1d_deque(D_batch[s:, s:], r) # minimum_filter1d(D_batch[submatrix_start:, s:], size=r, mode='nearest', origin=-(r // 2), axis=1)
+        N = minimum_filter_1d_deque(M.T, r).T # minimum_filter1d(M, size=r, mode='nearest', origin=-(r // 2), axis=0)
+        SMaP = D_batch[:N.shape[0], :N.shape[1]] + N
+
+        # keep only non-overlapping part
+        SMaP_valid = SMaP[:bin_size]
+
+        # fill knns
+        for j, order in enumerate(range(start, end)):
+            trivialMatchRange = (
+                int(max(0, order - exclusion_radius)),
+                int(min(order + exclusion_radius, n_smp_points)),
+            )
+            SMaP_valid[j, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+            if SMaP_valid.shape[1] >= k:
+                knns[order] = np.argpartition(SMaP_valid[j], k)[:k]
+            else:
+                knns[order] = np.arange(SMaP_valid.shape[1], dtype=np.int64)
 
     return knns
 
@@ -346,10 +748,38 @@ def _calc_profile(m, knn_mask, score, exclusion_zone):
 
     return profile
 
+def _map_distance(distance_name):
+    """
+    Maps a distance name to its respective distance function
+
+    Parameters
+    ----------
+    distance_name : str
+        The name of the distance method
+
+    Returns
+    -------
+    distance_function : callable
+        The distance function to be used
+    """
+    _DISTANCE_MAPPING = {
+        "znormed_euclidian_distance" : _compute_distances_ed,
+        "prefix_suffix_distance" : _compute_ps_whole,
+        "prefix_suffix_batchwise" : _compute_ps_batchwise,
+        "prefix_suffix_iterative" : _compute_ps_iterative
+        }
+
+    if distance_name not in _DISTANCE_MAPPING:
+        raise ValueError(
+            f"{distance_name} is not a valid distance. Implementations include: {', '.join(_DISTANCE_MAPPING.keys())}")
+
+    return _DISTANCE_MAPPING[distance_name]
 
 def clasp(
     X,
+    distance,
     m,
+    r=None,
     k_neighbours=3,
     score=_roc_auc_score,
     interpolate=True,
@@ -362,8 +792,12 @@ def clasp(
     ----------
     X : array-like, shape = [n]
         A single univariate time series of length n
+    distance : callable
+        The distance function to be computed.
     m : int
         The window size to generate sliding windows
+    r : int
+        The size of the variable don't-care region for prefix-suffix distance
     k_neighbours : int
         The number of knn to use
     score : function
@@ -380,12 +814,13 @@ def clasp(
     Tuple (array-like of shape [n], array-like of shape [k_neighbours, n])
         The ClaSP and the knn_mask
     """
-    knn_mask = _compute_distances_iterative(X, m, k_neighbours, n_jobs=n_jobs).T
+    knn_mask = distance(X, m, r=r, k=k_neighbours, n_jobs=n_jobs).T
 
     n_timepoints = knn_mask.shape[1]
-    exclusion_zone = max(m, np.int64(n_timepoints * exclusion_radius))
-
-    profile = _calc_profile(m, knn_mask, score, exclusion_zone)
+    subsequence_length = X.shape[0] - n_timepoints
+    
+    exclusion_zone = max(subsequence_length, np.int64(n_timepoints * exclusion_radius))
+    profile = _calc_profile(subsequence_length, knn_mask, score, exclusion_zone)
 
     if interpolate:
         profile = pd.Series(profile).interpolate(limit_direction="both").to_numpy()
@@ -405,6 +840,8 @@ class ClaSPTransformer(BaseSeriesTransformer):
     ----------
     window_length :       int, default = 10
         size of window for sliding.
+    dont_care_length : int, default = None
+        size of the variable don't care length for prefix-suffix distance
     scoring_metric :      string, default = ROC_AUC
         the scoring metric to use in ClaSP - choose from ROC_AUC or F1
     exclusion_radius : int
@@ -445,13 +882,18 @@ class ClaSPTransformer(BaseSeriesTransformer):
     def __init__(
         self,
         window_length=10,
+        dont_care_length=None,
         scoring_metric="ROC_AUC",
         exclusion_radius=0.05,
+        distance_name="znormed_euclidian_distance",
         n_jobs=1,
     ):
         self.window_length = int(window_length)
+        self.dont_care_length = int(dont_care_length)
         self.scoring_metric = scoring_metric
         self.exclusion_radius = exclusion_radius
+        self.distance_name = distance_name
+        self.distance = _map_distance(distance_name)
         self.n_jobs = n_jobs
         super().__init__(axis=0)
 
@@ -496,7 +938,9 @@ class ClaSPTransformer(BaseSeriesTransformer):
 
         Xt, _ = clasp(
             X,
+            self.distance,
             self.window_length,
+            self.dont_care_length,
             score=scoring_metric_call,
             exclusion_radius=self.exclusion_radius,
             n_jobs=n_jobs,

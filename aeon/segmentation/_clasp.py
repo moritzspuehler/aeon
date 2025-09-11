@@ -180,6 +180,8 @@ class ClaSPSegmenter(BaseSegmenter):
     ----------
     period_length : int, default = 10
         Size of window for sliding, based on the period length of the data.
+    dont_care_length : int, default = None
+        Size of the variable don't care length for prefix-suffix distance
     n_cps : int, default = 1
         The number of change points to search.
     exclusion_radius : int
@@ -209,10 +211,12 @@ class ClaSPSegmenter(BaseSegmenter):
 
     _tags = {"capability:multithreading": True, "fit_is_empty": True}
 
-    def __init__(self, period_length=10, n_cps=1, exclusion_radius=0.05, n_jobs=1):
+    def __init__(self, period_length=10, dont_care_length=None, n_cps=1, exclusion_radius=0.05, distance="znormed_euclidean_distance", n_jobs=1):
         self.period_length = int(period_length)
+        self.dont_care_length = dont_care_length
         self.n_cps = n_cps
         self.exclusion_radius = exclusion_radius
+        self.distance_name = distance
         self.n_jobs = n_jobs
         super().__init__(axis=1, n_segments=n_cps + 1)
 
@@ -270,7 +274,9 @@ class ClaSPSegmenter(BaseSegmenter):
 
         clasp_transformer = ClaSPTransformer(
             window_length=self.period_length,
+            dont_care_length=self.dont_care_length,
             exclusion_radius=self.exclusion_radius,
+            distance_name=self.distance_name,
             n_jobs=n_jobs,
         ).fit(X)
 
