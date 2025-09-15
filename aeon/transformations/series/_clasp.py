@@ -20,7 +20,6 @@ import warnings
 import numpy as np
 import numpy.fft as fft
 import pandas as pd
-from scipy.ndimage import minimum_filter1d
 from collections import deque
 from numba import njit, objmode, prange
 
@@ -179,8 +178,75 @@ def _compute_distances_ed(X, m, k, r=None, n_jobs=1, slack=0.5):
 
     return knns
 
+@njit(fastmath=True, cache=True)
+def minimum_filter_1d_circular_col(X_col, r):
+    """
+    Compute a trailing-forward minimum filter along a 1D column using
+    a circular buffer of size r (window size).
+    Window is always [i : i+r], i.e. trailing forward.
+    
+    Parameters
+    ----------
+    X_col : array-like, shape [n]
+        The column on which to apply the sliding min filter.
+    r : int
+        The size of the filter.
 
-def minimum_filter_1d_deque(X, r):
+    Returns
+    -------
+    out : array-like, shape [n]
+        The column after applying the sliding min filter.
+    """
+    n = X_col.shape[0]
+    out = np.empty(n, dtype=X_col.dtype)
+
+    # deque of indices
+    deq = np.empty(r+1, dtype=np.int64)
+    cap = r + 1
+    head = 0
+    tail = 0
+    size = 0
+
+    for i in range(n):
+        # remove indices that are no longer in the trailing window
+        while size > 0 and deq[head] <= i - cap:
+            head = (head + 1) % cap
+            size -= 1
+
+        # maintain increasing order in deque
+        while size > 0:
+            last_idx = deq[(tail - 1 + cap) % cap]
+            if X_col[i] <= X_col[last_idx]:
+                tail = (tail - 1 + cap) % cap
+                size -= 1
+            else:
+                break
+
+        # append current index
+        deq[tail] = i
+        tail = (tail + 1) % cap
+        size += 1
+
+        # output is the min of [i : i+r], so we align with window start
+        if i >= cap - 1:
+            out[i - cap + 1] = X_col[deq[head]]
+
+    # handle the last r-1 positions (where window runs off the end)
+    for j in range(n - cap + 1, n):
+        # remove indices that are no longer in the trailing window
+        while size > 0 and deq[head] < j:
+            head = (head + 1) % cap
+            size -= 1
+        out[j] = X_col[deq[head]]
+
+
+    return out
+
+
+
+
+@njit(fastmath=True, cache=True, parallel=True)
+def minimum_filter_1d_circular(X, r):
     """
     Apply the trailing minimum filter along columns of a 2D array.
 
@@ -200,11 +266,12 @@ def minimum_filter_1d_deque(X, r):
     out = np.empty_like(X)
 
     for col in prange(n_cols):
-        out[:, col] = _sliding_row_min(X[:, col], r)
+        out[:, col] = minimum_filter_1d_circular_col(X[:, col], r)
 
     return out
 
-#@njit(fastmath=True, cache=True, parallel=True)
+
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -267,8 +334,8 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
             dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))            
             D[order] = dist
 
-    M = minimum_filter_1d_deque(D[s:, s:], r) # minimum_filter1d(D[s:, s:], size=2, mode='nearest', origin=0, axis=1)
-    N = minimum_filter_1d_deque(M.T, r).T # minimum_filter1d(M, size=2, mode='nearest', origin=0, axis=0)
+    M = minimum_filter_1d_circular(D[s:, s:], r) # minimum_filter1d(D[s:, s:], size=2, mode='nearest', origin=0, axis=1)
+    N = minimum_filter_1d_circular(M.T, r).T # minimum_filter1d(M, size=2, mode='nearest', origin=0, axis=0)
 
     SMaP = D[:N.shape[0], :N.shape[1]] + N
     
@@ -485,6 +552,7 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
 
     return knns
 
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -524,7 +592,7 @@ def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
     if bin_size * n_jobs < n_smp_points:
         bin_size += 1
 
-    for idx in range(n_jobs):
+    for idx in prange(n_jobs):
         # define batch range
         start = idx * bin_size
         end = min((idx + 1) * bin_size, n_smp_points)
@@ -555,8 +623,8 @@ def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
             D_batch[j] = dist
 
         # apply sliding min filters (only valid part)
-        M = minimum_filter_1d_deque(D_batch[s:, s:], r) # minimum_filter1d(D_batch[submatrix_start:, s:], size=r, mode='nearest', origin=-(r // 2), axis=1)
-        N = minimum_filter_1d_deque(M.T, r).T # minimum_filter1d(M, size=r, mode='nearest', origin=-(r // 2), axis=0)
+        M = minimum_filter_1d_circular(D_batch[s:, s:], r) # minimum_filter1d(D_batch[submatrix_start:, s:], size=r, mode='nearest', origin=-(r // 2), axis=1)
+        N = minimum_filter_1d_circular(M.T, r).T # minimum_filter1d(M, size=r, mode='nearest', origin=-(r // 2), axis=0)
         SMaP = D_batch[:N.shape[0], :N.shape[1]] + N
 
         # keep only non-overlapping part
