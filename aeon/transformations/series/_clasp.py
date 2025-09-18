@@ -957,7 +957,7 @@ class ClaSPTransformer(BaseSeriesTransformer):
         n_jobs=1,
     ):
         self.window_length = int(window_length)
-        self.dont_care_length = int(dont_care_length)
+        self.dont_care_length = dont_care_length
         self.scoring_metric = scoring_metric
         self.exclusion_radius = exclusion_radius
         self.distance_name = distance_name
