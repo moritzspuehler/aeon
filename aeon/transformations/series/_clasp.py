@@ -201,48 +201,45 @@ def minimum_filter_1d_circular_col(X_col, r):
     out = np.empty(n, dtype=X_col.dtype)
 
     # deque of indices
-    deq = np.empty(r+1, dtype=np.int64)
-    cap = r + 1
+    deq = np.empty(r, dtype=np.int64)
     head = 0
     tail = 0
     size = 0
 
     for i in range(n):
         # remove indices that are no longer in the trailing window
-        while size > 0 and deq[head] <= i - cap:
-            head = (head + 1) % cap
+        while size > 0 and deq[head] <= i - r:
+            head = (head + 1) % r
             size -= 1
 
         # maintain increasing order in deque
         while size > 0:
-            last_idx = deq[(tail - 1 + cap) % cap]
+            last_idx = deq[(tail - 1 + r) % r]
             if X_col[i] <= X_col[last_idx]:
-                tail = (tail - 1 + cap) % cap
+                tail = (tail - 1 + r) % r
                 size -= 1
             else:
                 break
 
         # append current index
         deq[tail] = i
-        tail = (tail + 1) % cap
+        tail = (tail + 1) % r
         size += 1
 
         # output is the min of [i : i+r], so we align with window start
-        if i >= cap - 1:
-            out[i - cap + 1] = X_col[deq[head]]
+        if i >= r - 1:
+            out[i - r + 1] = X_col[deq[head]]
 
     # handle the last r-1 positions (where window runs off the end)
-    for j in range(n - cap + 1, n):
+    for j in range(n - r + 1, n):
         # remove indices that are no longer in the trailing window
         while size > 0 and deq[head] < j:
-            head = (head + 1) % cap
+            head = (head + 1) % r
             size -= 1
         out[j] = X_col[deq[head]]
 
 
     return out
-
-
 
 
 @njit(fastmath=True, cache=True, parallel=True)
@@ -271,7 +268,7 @@ def minimum_filter_1d_circular(X, r):
     return out
 
 
-@njit(fastmath=True, cache=True, parallel=True)
+# @njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -358,111 +355,38 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
 
     return knns
 
-from collections import deque
-import numpy as np
+@njit(fastmath=True, cache=True)
+def _sliding_min_update(row, values, times, heads, tails, time):
+    filter_size = values.shape[1]
 
-class _SlidingColumnMin:
-    """
-    Efficiently computes sliding-window minimum values along each column of
-    a matrix-like input, one row at a time.
+    for j, val in enumerate(row):
+        head, tail = heads[j], tails[j]
 
-    This class maintains a separate monotonic deque for each column, allowing
-    updates in amortized O(1) per element. It is useful in algorithms that 
-    require column-wise sliding minima (e.g., in image processing, matrix 
-    morphology operations, or time-series analysis with multiple features).
+        # Remove elements >= new val (monotonic increasing queue)
+        while head != tail: # not empty
+            prev = (tail - 1 + filter_size) % filter_size
+            if values[j, prev] >= val:
+                tail = prev
+            else:
+                break
 
-    Attributes
-    ----------
-    deques : list[deque]
-        One deque per column, each storing (time, value) pairs in increasing 
-        order of value.
-    window : int
-        The sliding window size, expressed in number of rows.
-    time : int
-        The current row index (increments with each update).
-    """
+        # insert new element at tail
+        values[j, tail] = val
+        times[j, tail] = time
+        tail = (tail + 1) % filter_size
 
-    def __init__(self, n_cols, window):
-        """
-        Initialize the sliding column minimum structure.
+        # Remove expired elements (older than filter_size)
+        while times[j, head] <= time - filter_size + 1:
+            head = (head + 1) % filter_size
+        
+        # update pointers
+        heads[j] = head
+        tails[j] = tail
 
-        Parameters
-        ----------
-        n_cols : int
-            Number of columns to track.
-        window : int
-            Sliding window size in number of rows. Only values within the last
-            `window` rows are considered for the minimum.
-        """
-        self.deques = [deque() for _ in range(n_cols)]
-        self.window = window
-        self.time = 0
-
-    def update(self, row):
-        """
-        Process a new row and compute the sliding minimum for each column.
-
-        Parameters
-        ----------
-        row : array-like
-            A sequence of values (length = n_cols) representing the next row
-            of data.
-
-        Returns
-        -------
-        result : np.ndarray
-            Array of length n_cols, where each entry is the current minimum of
-            that column within the last `window` rows.
-        """
-        result = np.empty(len(row))
-        for j, val in enumerate(row):
-            dq = self.deques[j]
-
-            # Remove elements larger than the new value (maintain increasing order)
-            while dq and dq[-1][1] >= val:
-                dq.pop()
-            dq.append((self.time, val))
-
-            # Remove elements that are outside the sliding window
-            while dq and dq[0][0] < self.time - self.window:
-                dq.popleft()
-
-            result[j] = dq[0][1]
-        self.time += 1
-        return result
-
-    
-def _sliding_row_min(row, window_size):
-    """
-    Calculates a sliding minimum filter on an array.
-
-    Parameters
-    ----------
-
-    """
-    n = len(row)
-    result = np.empty(n)
-    dq = deque()
-    dq.append((0, row[0]))
-
-    for i in range(n):
-        # remove elements that are out of the current window (to the left)
-        while dq and dq[0][0] < i:
-            dq.popleft()
-
-        # add new element for the window end
-        end = min(i + window_size, n - 1)
-        val = row[end]
-        while dq and dq[-1][1] >= val:
-            dq.pop()
-        dq.append((end, val))
-
-        # the front of the deque is the min in the current window
-        result[i] = dq[0][1]
-
-    return result
+    return values, times, heads, tails
 
 # TODO: numba compatible
+@njit(fastmath=True, cache=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -494,8 +418,17 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     n_smp_points = np.int32(X.shape[0] - 2*s + 1)
     exclusion_radius = int(2 * (r+s) * slack)
 
-    D = deque()
-    sliding_col_min = _SlidingColumnMin(n_cols=n_smp_points, window=r)
+    # circular buffer for distances
+    buffer_size = s + r + 1
+    D = np.empty((buffer_size, n_windows), dtype=np.float64)
+    D_idx = 0  # current write index
+
+    # circular buffer for sliding min
+    M = np.full((n_smp_points, r+1), np.inf, dtype=np.float64)
+    M_times = np.full((n_smp_points, r+1), -1, dtype=np.int64) # holds each values insertion time
+    M_heads = np.zeros(n_smp_points, dtype=np.int64) # points to each first valid element
+    M_tails = np.zeros(n_smp_points, dtype=np.int64)   # points to each last valid element
+    
     knns = np.zeros(shape=(n_smp_points, k), dtype=np.int64)
 
     means, stds = _sliding_mean_std(X, s)
@@ -521,34 +454,46 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
         x_std = stds[order]
 
         dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
-        D.append(dist)
-
-        M_i = sliding_col_min.update(dist[s:])
+        
+        # write into circular buffer
+        D[D_idx] = dist
+        D_idx = (D_idx + 1) % buffer_size
 
         if order >= s+r:
-            N_i = _sliding_row_min(M_i, r)
-            SMaP_i = D.popleft()[:N_i.shape[0]] + N_i
+            MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
+            MP = minimum_filter_1d_circular_col(MP, r) # N_i
+            MP += D[D_idx][:MP.shape[0]] # SMaP_i; D[D_idx] is oldest row
         
             trivialMatchRange = (
                     int(max(0, order-s-r - exclusion_radius)),
                     int(min(order-s-r + exclusion_radius, n_windows)),
                 )
-            SMaP_i[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+            MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
             
-            knns[order-s-r] = np.argpartition(SMaP_i, k)[:k]
+            knns[order-s-r] = np.argpartition(MP, k)[:k]
 
+        # update min filters 
+        M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
+
+    # last indices
     for order in range(r):
-        M_i = sliding_col_min.update(D[-1][s:])
-        N_i = _sliding_row_min(M_i, r)
-        SMaP_i = D.popleft()[:N_i.shape[0]] + N_i
-    
+        MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
+        MP = minimum_filter_1d_circular_col(MP, r) # N_i
+
+        D_idx = (D_idx + 1) % buffer_size # take next prefix
+        MP += D[D_idx][:MP.shape[0]] # SMaP_i
+        
         trivialMatchRange = (
                 int(max(0, n_smp_points - r + order - exclusion_radius)),
-                n_smp_points,
+                int(min(n_smp_points, n_smp_points - r + order + exclusion_radius))
             )
-        SMaP_i[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+        MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
         
-        knns[order-r] = np.argpartition(SMaP_i, k)[:k]
+        knns[order-r] = np.argpartition(MP, k)[:k]
+
+        # update min filters
+        M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=n_windows+order)
+
 
     return knns
 
