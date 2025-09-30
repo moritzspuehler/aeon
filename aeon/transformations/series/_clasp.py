@@ -243,7 +243,7 @@ def minimum_filter_1d_circular_col(X_col, r):
 
 
 @njit(fastmath=True, cache=True, parallel=True)
-def minimum_filter_1d_circular(X, r):
+def minimum_filter_1d_circular(X, r, out):
     """
     Apply the trailing minimum filter along columns of a 2D array.
 
@@ -253,6 +253,8 @@ def minimum_filter_1d_circular(X, r):
         The 2D array for which to calculate a sliding window minimum on each column
     r : int
         The size of the filter
+    out : array-like, shape [m, n]
+        An Array of the same shape as the input in which the result should be stored.
 
     Returns
     -------
@@ -260,7 +262,6 @@ def minimum_filter_1d_circular(X, r):
         A 2D array after applying the sliding minimum filter
     """
     n_rows, n_cols = X.shape
-    out = np.empty_like(X)
 
     for col in prange(n_cols):
         out[:, col] = minimum_filter_1d_circular_col(X[:, col], r)
@@ -268,7 +269,7 @@ def minimum_filter_1d_circular(X, r):
     return out
 
 
-# @njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -296,15 +297,16 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
         The knns (offsets!) for each subsequence in X
     """
     n_windows = np.int32(X.shape[0] - s + 1)
+    n_smp_points = np.int32(X.shape[0] - 2*s + 1)
     exclusion_radius = int(2 * (s+r) * slack)
 
-    knns = np.zeros(shape=(n_windows-s, k), dtype=np.int64)
+    knns = np.zeros(shape=(n_smp_points, k), dtype=np.int64)
 
     means, stds = _sliding_mean_std(X, s)
     dot_first = _sliding_dot_product(X[:s], X)
     bin_size = X.shape[0] // n_jobs
 
-    D = np.empty((n_windows,n_windows))
+    D = np.empty((n_windows, n_windows))
 
     for idx in prange(n_jobs):
         start = idx * bin_size
@@ -331,14 +333,15 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
             dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))            
             D[order] = dist
 
-    M = minimum_filter_1d_circular(D[s:, s:], r) # minimum_filter1d(D[s:, s:], size=2, mode='nearest', origin=0, axis=1)
-    N = minimum_filter_1d_circular(M.T, r).T # minimum_filter1d(M, size=2, mode='nearest', origin=0, axis=0)
+    MP = np.empty(shape=(n_smp_points, n_smp_points), dtype=np.float64)
+    MP = minimum_filter_1d_circular(D[s:, s:], r, out=MP) # M
+    MP = minimum_filter_1d_circular(MP.T, r, out=MP.T).T # N
 
-    SMaP = D[:N.shape[0], :N.shape[1]] + N
+    MP += D[:MP.shape[0], :MP.shape[1]] # SMaP
     
     for idx in prange(n_jobs):
         start = idx * bin_size
-        end = min((idx + 1) * bin_size, SMaP.shape[0])
+        end = min((idx + 1) * bin_size, MP.shape[0])
 
         for order in np.arange(start, end):
             # self-join: exclusion zone
@@ -346,12 +349,12 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
                 int(max(0, order - exclusion_radius)),
                 int(min(order + exclusion_radius, n_windows-s)),
             )
-            SMaP[order, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+            MP[order, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
 
-            if SMaP.shape[0] >= k:
-                knns[order] = np.argpartition(SMaP[order], k)[:k]
+            if MP.shape[0] >= k:
+                knns[order] = np.argpartition(MP[order], k)[:k]
             else:
-                knns[order] = np.arange(SMaP[order].shape[0], dtype=np.int64)
+                knns[order] = np.arange(MP[order].shape[0], dtype=np.int64)
 
     return knns
 
@@ -385,7 +388,7 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-# TODO: numba compatible
+# TODO: parallize
 @njit(fastmath=True, cache=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
@@ -528,14 +531,13 @@ def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
     n_windows = np.int32(X.shape[0] - s + 1)
     n_smp_points = np.int32(X.shape[0] - 2*s + 1)
     exclusion_radius = int(2 * (s + r) * slack)
-    knns = np.zeros(shape=(n_windows - s, k), dtype=np.int64)
+
+    knns = np.zeros(shape=(n_smp_points, k), dtype=np.int64)
 
     means, stds = _sliding_mean_std(X, s)
     dot_first = _sliding_dot_product(X[:s], X)
 
-    bin_size = (n_smp_points + 1) // n_jobs
-    if bin_size * n_jobs < n_smp_points:
-        bin_size += 1
+    bin_size = (n_smp_points + n_jobs - 1) // n_jobs
 
     for idx in prange(n_jobs):
         # define batch range
@@ -567,13 +569,14 @@ def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
             dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
             D_batch[j] = dist
 
-        # apply sliding min filters (only valid part)
-        M = minimum_filter_1d_circular(D_batch[s:, s:], r) # minimum_filter1d(D_batch[submatrix_start:, s:], size=r, mode='nearest', origin=-(r // 2), axis=1)
-        N = minimum_filter_1d_circular(M.T, r).T # minimum_filter1d(M, size=r, mode='nearest', origin=-(r // 2), axis=0)
-        SMaP = D_batch[:N.shape[0], :N.shape[1]] + N
+        # apply sliding min filters
+        MP = np.empty(shape=(batch_end - start - s, n_smp_points), dtype=np.float64)
+        MP = minimum_filter_1d_circular(D_batch[s:, s:], r, out=MP) # M
+        MP = minimum_filter_1d_circular(MP.T, r, out=MP.T).T # N
+        MP += D_batch[:MP.shape[0], :MP.shape[1]] # SMaP
 
         # keep only non-overlapping part
-        SMaP_valid = SMaP[:bin_size]
+        MP = MP[:bin_size]
 
         # fill knns
         for j, order in enumerate(range(start, end)):
@@ -581,11 +584,12 @@ def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
                 int(max(0, order - exclusion_radius)),
                 int(min(order + exclusion_radius, n_smp_points)),
             )
-            SMaP_valid[j, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
-            if SMaP_valid.shape[1] >= k:
-                knns[order] = np.argpartition(SMaP_valid[j], k)[:k]
+            MP[j, trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+            
+            if MP.shape[1] >= k:
+                knns[order] = np.argpartition(MP[j], k)[:k]
             else:
-                knns[order] = np.arange(SMaP_valid.shape[1], dtype=np.int64)
+                knns[order] = np.arange(MP.shape[1], dtype=np.int64)
 
     return knns
 
