@@ -178,6 +178,7 @@ def _compute_distances_ed(X, m, k, r=None, n_jobs=1, slack=0.5):
 
     return knns
 
+# TODO: reverse array for cleaner transition
 @njit(fastmath=True, cache=True)
 def minimum_filter_1d_circular_col(X_col, r):
     """
@@ -358,11 +359,12 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
 
     return knns
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _sliding_min_update(row, values, times, heads, tails, time):
     filter_size = values.shape[1]
 
-    for j, val in enumerate(row):
+    for j in prange(len(row)):
+        val = row[j]
         head, tail = heads[j], tails[j]
 
         # Remove elements >= new val (monotonic increasing queue)
@@ -388,7 +390,6 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-# TODO: parallize
 @njit(fastmath=True, cache=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
@@ -420,83 +421,93 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     n_windows = np.int32(X.shape[0] - s + 1)
     n_smp_points = np.int32(X.shape[0] - 2*s + 1)
     exclusion_radius = int(2 * (r+s) * slack)
-
-    # circular buffer for distances
-    buffer_size = s + r + 1
-    D = np.empty((buffer_size, n_windows), dtype=np.float64)
-    D_idx = 0  # current write index
-
-    # circular buffer for sliding min
-    M = np.full((n_smp_points, r+1), np.inf, dtype=np.float64)
-    M_times = np.full((n_smp_points, r+1), -1, dtype=np.int64) # holds each values insertion time
-    M_heads = np.zeros(n_smp_points, dtype=np.int64) # points to each first valid element
-    M_tails = np.zeros(n_smp_points, dtype=np.int64)   # points to each last valid element
     
     knns = np.zeros(shape=(n_smp_points, k), dtype=np.int64)
 
     means, stds = _sliding_mean_std(X, s)
     dot_first = _sliding_dot_product(X[:s], X)
-    # bin_size = X.shape[0] // n_jobs
 
-    dot_prev = None
-    for order in range(n_windows):
-        if order == 0:
-            # first iteration O(n log n)
-            dot_rolled = _sliding_dot_product(X[:s], X)
-        else:
-            # constant time O(1) operations
-            dot_rolled = (
-                np.roll(dot_prev, 1)
-                + X[order + s - 1] * X[s - 1 : n_windows + s]
-                - X[order - 1] * np.roll(X[:n_windows], 1)
-            )
-            dot_rolled[0] = dot_first[order]
-        dot_prev = dot_rolled
+    bin_size = (n_smp_points + n_jobs - 1) // n_jobs
 
-        x_mean = means[order]
-        x_std = stds[order]
+    for idx in prange(n_jobs):
+        start = idx * bin_size
+        end = min((idx + 1) * bin_size, n_smp_points)
+        batch_end = min(n_windows, end + s + r)
 
-        dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
-        
-        # write into circular buffer
-        D[D_idx] = dist
-        D_idx = (D_idx + 1) % buffer_size
+        # circular buffer for distances
+        buffer_size = s + r + 1
+        D = np.empty((buffer_size, n_windows), dtype=np.float64)
+        D_head = 0 # current read index
+        D_tail = 0 # current write index
 
-        if order >= s+r:
-            MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
-            MP = minimum_filter_1d_circular_col(MP, r) # N_i
-            MP += D[D_idx][:MP.shape[0]] # SMaP_i; D[D_idx] is oldest row
-        
-            trivialMatchRange = (
-                    int(max(0, order-s-r - exclusion_radius)),
-                    int(min(order-s-r + exclusion_radius, n_windows)),
+        # circular buffer for sliding min
+        M = np.full((n_smp_points, r+1), np.inf, dtype=np.float64)
+        M_times = np.full((n_smp_points, r+1), -1, dtype=np.int64) # holds each values insertion time
+        M_heads = np.zeros(n_smp_points, dtype=np.int64) # points to each first valid element
+        M_tails = np.zeros(n_smp_points, dtype=np.int64)   # points to each last valid element
+
+        dot_prev = None
+        for _, order in enumerate(range(start, batch_end)):
+            if order == start:
+                # first iteration O(n log n)
+                dot_rolled = _sliding_dot_product(X[order:order+s], X)
+            else:
+                # constant time O(1) operations
+                dot_rolled = (
+                    np.roll(dot_prev, 1)
+                    + X[order + s - 1] * X[s - 1 : n_windows + s]
+                    - X[order - 1] * np.roll(X[:n_windows], 1)
                 )
-            MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+                dot_rolled[0] = dot_first[order]
+            dot_prev = dot_rolled
+
+            x_mean = means[order]
+            x_std = stds[order]
+
+            dist = 2 * s * (1 - (dot_rolled - s * means * x_mean) / (s * stds * x_std))
             
-            knns[order-s-r] = np.argpartition(MP, k)[:k]
+            # write into circular buffer
+            D[D_tail] = dist
+            D_tail = (D_tail + 1) % buffer_size
 
-        # update min filters 
-        M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
+            if order >= start + s + r:
+                MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
+                MP = minimum_filter_1d_circular_col(MP, r) # N_i
+                MP += D[D_head][:MP.shape[0]] # SMaP_i; D[D_idx] is oldest row
 
-    # last indices
-    for order in range(r):
-        MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
-        MP = minimum_filter_1d_circular_col(MP, r) # N_i
+                D_head = (D_head + 1) % buffer_size
+            
+                trivialMatchRange = (
+                        int(max(0, order-s-r - exclusion_radius)),
+                        int(min(order-s-r + exclusion_radius, n_windows)),
+                    )
+                MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+                
+                knns[order-s-r] = np.argpartition(MP, k)[:k]
 
-        D_idx = (D_idx + 1) % buffer_size # take next prefix
-        MP += D[D_idx][:MP.shape[0]] # SMaP_i
-        
-        trivialMatchRange = (
-                int(max(0, n_smp_points - r + order - exclusion_radius)),
-                int(min(n_smp_points, n_smp_points - r + order + exclusion_radius))
-            )
-        MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
-        
-        knns[order-r] = np.argpartition(MP, k)[:k]
+            # update min filters 
+            M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
 
-        # update min filters
-        M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=n_windows+order)
+        # last indices
+        if end + r >= n_smp_points:
+            for order in range(n_smp_points-r, end):
+                if order >= start:
+                    MP = np.take_along_axis(M, M_heads[:, None], axis=1).ravel() # M_i
+                    MP = minimum_filter_1d_circular_col(MP, r) # N_i
 
+                    MP += D[D_head][:MP.shape[0]] # SMaP_i
+                    D_head = (D_head + 1) % buffer_size
+                    
+                    trivialMatchRange = (
+                            int(max(0, order - exclusion_radius)),
+                            int(min(n_smp_points, order + exclusion_radius))
+                        )
+                    MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
+                    
+                    knns[order] = np.argpartition(MP, k)[:k]
+
+                # update min filters
+                M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order+s+r)
 
     return knns
 
