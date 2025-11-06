@@ -390,7 +390,7 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-# @njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -429,14 +429,10 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
 
     bin_size = (n_smp_points + n_jobs - 1) // n_jobs
 
-    print(f"n: {X.shape[0]}\t #windows: {n_windows}\t #patterns: {n_smp_points}") # DEBUG
-
     for idx in prange(n_jobs):
         start = idx * bin_size
         end = min((idx + 1) * bin_size, n_smp_points)
         batch_end = min(n_windows, end + s + r)
-
-        print(f"start: {start}, end: {end}, batch_end: {batch_end}") # DEBUG
 
         # circular buffer for distances
         buffer_size = s + r + 1
@@ -492,7 +488,6 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
             # update min filters 
             M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
 
-        print("Calculate Tail") # DEBUG
         # last indices
         if end + r >= n_smp_points:
             for order in range(n_smp_points-r, end):
