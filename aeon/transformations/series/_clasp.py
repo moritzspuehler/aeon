@@ -243,7 +243,7 @@ def minimum_filter_1d_circular_col(X_col, r):
     return out
 
 
-@njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True)
 def minimum_filter_1d_circular(X, r, out):
     """
     Apply the trailing minimum filter along columns of a 2D array.
@@ -264,7 +264,7 @@ def minimum_filter_1d_circular(X, r, out):
     """
     n_rows, n_cols = X.shape
 
-    for col in prange(n_cols):
+    for col in range(n_cols):
         out[:, col] = minimum_filter_1d_circular_col(X[:, col], r)
 
     return out
@@ -359,11 +359,11 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
 
     return knns
 
-@njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True)
 def _sliding_min_update(row, values, times, heads, tails, time):
     filter_size = values.shape[1]
 
-    for j in prange(len(row)):
+    for j in range(len(row)):
         val = row[j]
         head, tail = heads[j], tails[j]
 
@@ -390,7 +390,7 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-@njit(fastmath=True, cache=True)
+# @njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -429,10 +429,14 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
 
     bin_size = (n_smp_points + n_jobs - 1) // n_jobs
 
+    print(f"n: {X.shape[0]}\t #windows: {n_windows}\t #patterns: {n_smp_points}") # DEBUG
+
     for idx in prange(n_jobs):
         start = idx * bin_size
         end = min((idx + 1) * bin_size, n_smp_points)
         batch_end = min(n_windows, end + s + r)
+
+        print(f"start: {start}, end: {end}, batch_end: {batch_end}") # DEBUG
 
         # circular buffer for distances
         buffer_size = s + r + 1
@@ -488,6 +492,7 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
             # update min filters 
             M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
 
+        print("Calculate Tail") # DEBUG
         # last indices
         if end + r >= n_smp_points:
             for order in range(n_smp_points-r, end):
