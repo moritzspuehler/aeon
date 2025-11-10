@@ -791,7 +791,7 @@ def _map_distance(distance_name):
         The distance function to be used
     """
     _DISTANCE_MAPPING = {
-        "znormed_euclidian_distance" : _compute_distances_ed,
+        "znormed_euclidean_distance" : _compute_distances_ed,
         "prefix_suffix_distance" : _compute_ps_whole,
         "prefix_suffix_batchwise" : _compute_ps_batchwise,
         "prefix_suffix_iterative" : _compute_ps_iterative
