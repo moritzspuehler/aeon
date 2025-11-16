@@ -179,7 +179,7 @@ def _compute_distances_ed(X, m, k, r=None, n_jobs=1, slack=0.5):
     return knns
 
 # TODO: reverse array for cleaner transition
-@njit(fastmath=True, cache=True)
+# @njit(fastmath=True, cache=True)
 def minimum_filter_1d_circular_col(X_col, r):
     """
     Compute a trailing-forward minimum filter along a 1D column using
@@ -243,7 +243,7 @@ def minimum_filter_1d_circular_col(X_col, r):
     return out
 
 
-@njit(fastmath=True, cache=True)
+# @njit(fastmath=True, cache=True)
 def minimum_filter_1d_circular(X, r, out):
     """
     Apply the trailing minimum filter along columns of a 2D array.
