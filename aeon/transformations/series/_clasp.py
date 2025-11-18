@@ -390,7 +390,7 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-# @njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -511,7 +511,7 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
 
     return knns
 
-# @njit(fastmath=True, cache=True, parallel=True)
+@njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_batchwise(X, s, k, r, slack=0.5, n_jobs=5):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
