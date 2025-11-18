@@ -87,7 +87,7 @@ def _is_trivial_match(candidate, change_points, n_timepoints, exclusion_radius=0
     return False
 
 
-def _segmentation(X, clasp, n_change_points=None, exclusion_radius=0.05):
+def _segmentation(X, clasp, window_size, n_change_points=None, exclusion_radius=0.05):
     """Segments the time series by extracting change points.
 
     Parameters
@@ -144,7 +144,7 @@ def _segmentation(X, clasp, n_change_points=None, exclusion_radius=0.05):
         for ranges in [left_range, right_range]:
             # create and enqueue left local profile
             exclusion_zone = np.int64(len(ranges) * exclusion_radius)
-            if len(ranges) - period_size > 2 * exclusion_zone:
+            if len(ranges) - period_size > 2 * exclusion_zone and len(ranges) > window_size:
                 profile = clasp.transform(X[ranges])
                 change_point = np.argmax(profile)
                 score = profile[change_point]
@@ -280,9 +280,15 @@ class ClaSPSegmenter(BaseSegmenter):
             n_jobs=n_jobs,
         ).fit(X)
 
+        if self.dont_care_length is not None:
+            effective_window_size = 2 * self.period_length + self.dont_care_length
+        else:
+            effective_window_size = self.period_length
+
         self.found_cps, self.profiles, self.scores = _segmentation(
             X,
             clasp_transformer,
+            effective_window_size,
             n_change_points=self.n_cps,
             exclusion_radius=self.exclusion_radius,
         )
