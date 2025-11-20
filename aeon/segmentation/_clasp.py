@@ -87,7 +87,7 @@ def _is_trivial_match(candidate, change_points, n_timepoints, exclusion_radius=0
     return False
 
 
-def _segmentation(X, clasp, window_size, n_change_points=None, exclusion_radius=0.05):
+def _segmentation(X, clasp, effective_window_size, n_change_points=None, exclusion_radius=0.05):
     """Segments the time series by extracting change points.
 
     Parameters
@@ -109,14 +109,15 @@ def _segmentation(X, clasp, window_size, n_change_points=None, exclusion_radius=
     period_size = clasp.window_length
     queue = PriorityQueue()
 
-    # compute global clasp
-    profile = clasp.transform(X)
-    queue.put(
-        (
-            -np.max(profile),
-            [np.arange(X.shape[0]).tolist(), np.argmax(profile), profile],
+    if effective_window_size < X.shape[0]:
+        # compute global clasp
+        profile = clasp.transform(X)
+        queue.put(
+            (
+                -np.max(profile),
+                [np.arange(X.shape[0]).tolist(), np.argmax(profile), profile],
+            )
         )
-    )
 
     profiles = []
     change_points = []
@@ -144,7 +145,7 @@ def _segmentation(X, clasp, window_size, n_change_points=None, exclusion_radius=
         for ranges in [left_range, right_range]:
             # create and enqueue left local profile
             exclusion_zone = np.int64(len(ranges) * exclusion_radius)
-            if len(ranges) - period_size > 2 * exclusion_zone and len(ranges) > window_size:
+            if len(ranges) - period_size > 2 * exclusion_zone and len(ranges) >= effective_window_size:
                 profile = clasp.transform(X[ranges])
                 change_point = np.argmax(profile)
                 score = profile[change_point]
