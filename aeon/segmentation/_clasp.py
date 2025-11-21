@@ -282,7 +282,7 @@ class ClaSPSegmenter(BaseSegmenter):
         ).fit(X)
 
         if self.dont_care_length is not None:
-            effective_window_size = 2 * self.period_length
+            effective_window_size = 2 * self.period_length + self.dont_care_length
         else:
             effective_window_size = self.period_length
 
