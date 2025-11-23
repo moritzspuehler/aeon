@@ -109,7 +109,7 @@ def _segmentation(X, clasp, effective_window_size, n_change_points=None, exclusi
     period_size = clasp.window_length
     queue = PriorityQueue()
 
-    if effective_window_size < X.shape[0]:
+    if effective_window_size <= X.shape[0]:
         # compute global clasp
         profile = clasp.transform(X)
         queue.put(
@@ -282,7 +282,7 @@ class ClaSPSegmenter(BaseSegmenter):
         ).fit(X)
 
         if self.dont_care_length is not None:
-            effective_window_size = 2 * self.period_length + self.dont_care_length
+            effective_window_size = 2 * self.period_length
         else:
             effective_window_size = self.period_length
 

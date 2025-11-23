@@ -843,18 +843,18 @@ def clasp(
         The ClaSP and the knn_mask
     """
 
-    if r is not None:
-        # prefix-suffix case
-        if 2 * m + r > X.shape[0]:
-            raise ValueError(
-                f"Invalid prefix-suffix size: 2*m+r = {2*m+r} exceeds time series length {X.shape[0]}."
-            )
-    else:
-        # classical MP window-length case
-        if m > X.shape[0]:
-            raise ValueError(
-                f"Window size m = {m} exceeds time series length {X.shape[0]}."
-            )
+    # if r is not None:
+    #     # prefix-suffix case
+    #     if 2 * m + r > X.shape[0]:
+    #         raise ValueError(
+    #             f"Invalid prefix-suffix size: 2*m+r = {2*m+r} exceeds time series length {X.shape[0]}."
+    #         )
+    # else:
+    #     # classical MP window-length case
+    #     if m > X.shape[0]:
+    #         raise ValueError(
+    #             f"Window size m = {m} exceeds time series length {X.shape[0]}."
+    #         )
 
     knn_mask = distance(X, m, r=r, k=k_neighbours, n_jobs=n_jobs).T
 
