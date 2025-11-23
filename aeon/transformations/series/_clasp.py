@@ -232,7 +232,7 @@ def minimum_filter_1d_circular_col(X_col, r):
             out[i - r + 1] = X_col[deq[head]]
 
     # handle the last r-1 positions (where window runs off the end)
-    for j in range(n - r + 1, n):
+    for j in range(max(0, n - r + 1), n):
         # remove indices that are no longer in the trailing window
         while size > 0 and deq[head] < j:
             head = (head + 1) % r
@@ -483,7 +483,10 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
                     )
                 MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
                 
-                knns[order-s-r] = np.argpartition(MP, k)[:k]
+                if MP.shape[0] >= k:
+                    knns[order] = np.argpartition(MP, k)[:k]
+                else:
+                    knns[order] = np.arange(MP.shape[0], dtype=np.int64)
 
             # update min filters 
             M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
@@ -503,8 +506,11 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
                             int(min(n_smp_points, order + exclusion_radius))
                         )
                     MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
-                    
-                    knns[order] = np.argpartition(MP, k)[:k]
+                        
+                    if MP.shape[0] >= k:
+                        knns[order] = np.argpartition(MP, k)[:k]
+                    else:
+                        knns[order] = np.arange(MP.shape[0], dtype=np.int64)
 
                 # update min filters
                 M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order+s+r)
