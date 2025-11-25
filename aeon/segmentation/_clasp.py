@@ -109,7 +109,7 @@ def _segmentation(X, clasp, effective_window_size, n_change_points=None, exclusi
     period_size = clasp.window_length
     queue = PriorityQueue()
 
-    if effective_window_size <= X.shape[0]:
+    if effective_window_size < X.shape[0]:
         # compute global clasp
         profile = clasp.transform(X)
         queue.put(
@@ -145,7 +145,7 @@ def _segmentation(X, clasp, effective_window_size, n_change_points=None, exclusi
         for ranges in [left_range, right_range]:
             # create and enqueue left local profile
             exclusion_zone = np.int64(len(ranges) * exclusion_radius)
-            if len(ranges) - period_size > 2 * exclusion_zone and len(ranges) >= effective_window_size:
+            if len(ranges) - period_size > 2 * exclusion_zone and len(ranges) > effective_window_size:
                 profile = clasp.transform(X[ranges])
                 change_point = np.argmax(profile)
                 score = profile[change_point]
@@ -282,9 +282,9 @@ class ClaSPSegmenter(BaseSegmenter):
         ).fit(X)
 
         if self.dont_care_length is not None:
-            effective_window_size = 2 * self.period_length
+            effective_window_size = 2 * self.period_length + self.dont_care_length
         else:
-            effective_window_size = self.period_length
+            effective_window_size = self.period_length + self.dont_care_length
 
         self.found_cps, self.profiles, self.scores = _segmentation(
             X,
