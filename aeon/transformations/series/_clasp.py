@@ -198,6 +198,9 @@ def minimum_filter_1d_circular_col(X_col, r):
     out : array-like, shape [n]
         The column after applying the sliding min filter.
     """
+    if r == 0:
+        return X_col
+    
     n = X_col.shape[0]
     out = np.empty(n, dtype=X_col.dtype)
 
@@ -363,6 +366,14 @@ def _compute_ps_whole(X, s, k, r, slack=0.5, n_jobs=1):
 def _sliding_min_update(row, values, times, heads, tails, time):
     filter_size = values.shape[1]
 
+    if filter_size == 1:
+        # min over a window of size 1 is the element itself
+        values[:, 0] = row
+        times[:, 0] = time
+        heads[:] = 0
+        tails[:] = 0
+        return values, times, heads, tails
+
     for j in range(len(row)):
         val = row[j]
         head, tail = heads[j], tails[j]
@@ -390,7 +401,7 @@ def _sliding_min_update(row, values, times, heads, tails, time):
 
     return values, times, heads, tails
 
-@njit(fastmath=True, cache=True, parallel=True)
+# @njit(fastmath=True, cache=True, parallel=True)
 def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
     """
     Computes kNN indices given the prefix/suffix-distance approach by
@@ -484,9 +495,9 @@ def _compute_ps_iterative(X, s, k, r, slack=0.5, n_jobs=1):
                 MP[trivialMatchRange[0] : trivialMatchRange[1]] = np.inf
                 
                 if MP.shape[0] >= k:
-                    knns[order] = np.argpartition(MP, k)[:k]
+                    knns[order-s-r] = np.argpartition(MP, k)[:k]
                 else:
-                    knns[order] = np.arange(MP.shape[0], dtype=np.int64)
+                    knns[order-s-r] = np.arange(MP.shape[0], dtype=np.int64)
 
             # update min filters 
             M, M_times, M_heads, M_tails = _sliding_min_update(dist[s:], M, M_times, M_heads, M_tails, time=order)
