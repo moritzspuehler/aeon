@@ -243,7 +243,8 @@ class ClaSPSegmenter(BaseSegmenter):
             self.found_cps, self.profiles, self.scores = [], [], []
         else:
             self.found_cps, self.profiles, self.scores = self._run_clasp(X)
-            return self.found_cps
+        
+        return self.found_cps
 
     def predict_scores(self, X):
         """Return scores in ClaSP's profile for each annotation.
